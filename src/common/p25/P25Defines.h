@@ -6,6 +6,7 @@
  *
  *  Copyright (C) 2016 Jonathan Naylor, G4KLX
  *  Copyright (C) 2017-2024 Bryan Biedenkapp, N2PLL
+ *  Copyright (C) 2025 David Mason, KC3WIU
  *
  */
 /**
@@ -632,6 +633,7 @@ namespace p25
                 OSP_SYNC_BCAST = 0x30U,                 //! SYNC BCAST - Synchronization Broadcast
                 OSP_AUTH_DMD = 0x31U,                   //! AUTH DMD - Authentication Demand
                 OSP_AUTH_FNE_RESP = 0x32U,              //! AUTH FNE RESP - Authentication FNE Response
+                OSP_IDEN_UP_TDMA = 0x33U,               //! IDEN UP TDMA - Channel Identifier Update for TDMA Bands (For Future Use)
                 OSP_IDEN_UP_VU = 0x34U,                 //! IDEN UP VU - Channel Identifier Update for VHF/UHF Bands
                 OSP_TIME_DATE_ANN = 0x35U,              //! TIME DATE ANN - Time and Date Announcement
                 OSP_SYS_SRV_BCAST = 0x38U,              //! SYS SRV BCAST - System Service Broadcast

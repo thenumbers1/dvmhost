@@ -37,7 +37,7 @@ void* Host::threadP25Reader(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -45,13 +45,19 @@ void* Host::threadP25Reader(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
 
+        StopWatch stopWatch;
+        stopWatch.start();
+
         if (host->m_p25 != nullptr) {
             while (!g_killed) {
+                uint32_t ms = stopWatch.elapsed();
+                stopWatch.start();
+
                 // scope is intentional
                 {
                     // ------------------------------------------------------
@@ -138,6 +144,23 @@ void* Host::threadP25Reader(void* arg)
                                 else if (host->m_state != HOST_STATE_LOCKOUT) {
                                     LogWarning(LOG_HOST, "P25 modem data received, state = %u", host->m_state);
                                 }
+
+                                // were frames received while still in an In-Call reject state? if so, reset the timer
+                                if (host->m_p25->getRFState() == RS_RF_REJECTED) {
+                                    host->m_p25RejectTimer.start();
+                                    host->m_p25RejCnt++;
+                                }
+                            }
+                        } else {
+                            // if we're receiving no more frames, and we're in a in-call reject state, clear the state
+                            if (host->m_p25->getRFState() == RS_RF_REJECTED) {
+                                host->m_p25RejectTimer.clock(ms);
+                                if (host->m_p25RejectTimer.hasExpired()) {
+                                    LogMessage(LOG_HOST, "P25, reset from previous call reject, frames = %u", host->m_p25RejCnt);
+                                    host->m_p25RejectTimer.stop();
+                                    host->m_p25->clearRFReject();
+                                    host->m_p25RejCnt = 0U;
+                                }
                             }
                         }
                     }
@@ -150,7 +173,7 @@ void* Host::threadP25Reader(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -173,7 +196,7 @@ void* Host::threadP25Writer(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -181,7 +204,7 @@ void* Host::threadP25Writer(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -309,7 +332,7 @@ void* Host::threadP25Writer(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 

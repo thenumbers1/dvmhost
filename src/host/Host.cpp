@@ -125,12 +125,20 @@ Host::Host(const std::string& confFile) :
     m_nxdnQueueSizeBytes(1488U), // 31 frames
     m_authoritative(true),
     m_supervisor(false),
+    m_dmr1RejCnt(0U),
+    m_dmr2RejCnt(0U),
+    m_p25RejCnt(0U),
+    m_nxdnRejCnt(0U),
     m_dmrBeaconDurationTimer(1000U),
     m_dmrDedicatedTxTestTimer(1000U, 0U, 125U),
+    m_dmr1RejectTimer(1000U, 0U, 500U),
+    m_dmr2RejectTimer(1000U, 0U, 500U),
     m_p25BcastDurationTimer(1000U),
     m_p25DedicatedTxTestTimer(1000U, 0U, 125U),
+    m_p25RejectTimer(1000U, 0U, 500U),
     m_nxdnBcastDurationTimer(1000U),
     m_nxdnDedicatedTxTestTimer(1000U, 0U, 125U),
+    m_nxdnRejectTimer(1000U, 0U, 500U),
     m_dmrTx1WatchdogTimer(1000U, 1U),
     m_dmrTx1LoopMS(0U),
     m_dmrTx2WatchdogTimer(1000U, 1U),
@@ -1519,6 +1527,10 @@ bool Host::rmtPortModemHandler(Modem* modem, uint32_t ms, modem::RESP_TYPE_DVM r
         if (modem->getTrace())
             Utils::dump(1U, "TX Remote Data", buffer, len);
 
+        // never send less then 3 bytes
+        if (len < 3U)
+            return false;
+
         // send entire modem packet over the remote port
         m_modemRemotePort->write(buffer, len);
     }
@@ -1540,10 +1552,24 @@ bool Host::rmtPortModemHandler(Modem* modem, uint32_t ms, modem::RESP_TYPE_DVM r
             return true;
         }
 
-        uint8_t len = data[1U];
-        int ret = modem->write(data, len);
-        if (ret != int(len))
-            LogError(LOG_MODEM, "Error writing remote data");
+        uint32_t pktLength = 0U;
+        switch (data[0U]) {
+            case DVM_SHORT_FRAME_START:
+                pktLength = data[1U];
+                break;
+            case DVM_LONG_FRAME_START:
+                pktLength = ((data[1U] & 0xFFU) << 8) + (data[2U] & 0xFFU);
+                break;
+            default:
+                LogError(LOG_MODEM, "Invalid start of modem frame!");
+                break;
+        }
+
+        if (pktLength > 0U) {
+            int ret = modem->write(data, pktLength);
+            if (ret != int(pktLength))
+                LogError(LOG_MODEM, "Error writing remote data");
+        }
     }
 
     // handled modem response
@@ -1666,12 +1692,12 @@ void Host::setState(uint8_t state)
                 }
 
                 if (m_tidLookup != nullptr) {
+                    m_tidLookup->setReloadTime(0U);
                     m_tidLookup->stop();
-                    //delete m_tidLookup;
                 }
                 if (m_ridLookup != nullptr) {
+                    m_tidLookup->setReloadTime(0U);
                     m_ridLookup->stop();
-                    //delete m_ridLookup;
                 }
             }
             else {
@@ -1697,7 +1723,7 @@ void* Host::threadModem(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -1705,7 +1731,7 @@ void* Host::threadModem(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -1734,7 +1760,7 @@ void* Host::threadModem(void* arg)
                 Thread::sleep(m_idleTickDelay);
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -1757,7 +1783,7 @@ void* Host::threadWatchdog(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -1765,7 +1791,7 @@ void* Host::threadWatchdog(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -1949,7 +1975,7 @@ void* Host::threadWatchdog(void* arg)
                 Thread::sleep(m_idleTickDelay);
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -1972,7 +1998,7 @@ void* Host::threadSiteData(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -1980,7 +2006,7 @@ void* Host::threadSiteData(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -2018,7 +2044,7 @@ void* Host::threadSiteData(void* arg)
                 Thread::sleep(m_idleTickDelay);
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -2041,7 +2067,7 @@ void* Host::threadPresence(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -2049,7 +2075,7 @@ void* Host::threadPresence(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -2125,7 +2151,7 @@ void* Host::threadPresence(void* arg)
                 Thread::sleep(m_idleTickDelay);
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 

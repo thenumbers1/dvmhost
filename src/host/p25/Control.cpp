@@ -441,6 +441,17 @@ void Control::setOptions(yaml::Node& conf, bool supervisor, const std::string cw
         }
     });
 
+    // set the In-Call Control function callback
+    if (m_network != nullptr) {
+        m_network->setP25ICCCallback([=](network::NET_ICC::ENUM command, uint32_t dstId) { processInCallCtrl(command, dstId); });
+    }
+
+    // throw a warning if we are notifying a CC of our presence (this indicates we're a VC) *AND* we have the control
+    // enable flag set
+    if (m_enableControl && m_notifyCC) {
+        LogWarning(LOG_P25, "We are configured as a dedicated trunked voice channel but, have control data enabled. Don't do this, control data for a dedicated trunked voice channel should be disabled. This can cause unintended behavior.");
+    }
+
     if (printOptions) {
         LogInfo("    Silence Threshold: %u (%.1f%%)", m_voice->m_silenceThreshold, float(m_voice->m_silenceThreshold) / 12.33F);
         LogInfo("    Frame Loss Threshold: %u", m_frameLossThreshold);
@@ -592,6 +603,10 @@ bool Control::processFrame(uint8_t* data, uint32_t len)
     bool valid = m_nid.decode(data + 2U);
 
     if (!valid && m_rfState == RS_RF_LISTENING)
+        return false;
+
+    // if the controller is currently in an reject state; block any RF traffic
+    if (valid && m_rfState == RS_RF_REJECTED)
         return false;
 
     DUID::E duid = m_nid.getDUID();
@@ -930,19 +945,9 @@ void Control::clock()
         }
     }
 
-    // reset states if we're in a rejected state
-    if (m_rfState == RS_RF_REJECTED) {
-        m_txQueue.clear();
-
-        m_voice->resetRF();
-        m_voice->resetNet();
-
-        m_data->resetRF();
-
-        if (m_network != nullptr)
-            m_network->resetP25();
-
-        m_rfState = RS_RF_LISTENING;
+    // reset states if we're in a rejected state and we're a control channel
+    if (m_rfState == RS_RF_REJECTED && m_enableControl && m_dedicatedControl) {
+        clearRFReject();
     }
 
     if (m_frameLossCnt > 0U && m_rfState == RS_RF_LISTENING)
@@ -1117,6 +1122,25 @@ void Control::touchGrantTG(uint32_t dstId)
     }
 }
 
+/* Clears the current operating RF state back to idle. */
+
+void Control::clearRFReject()
+{
+    if (m_rfState == RS_RF_REJECTED) {
+        m_txQueue.clear();
+
+        m_voice->resetRF();
+        m_voice->resetNet();
+
+        m_data->resetRF();
+
+        if (m_network != nullptr)
+            m_network->resetP25();
+
+        m_rfState = RS_RF_LISTENING;
+    }
+}
+
 /* Flag indicating whether the processor or is busy or not. */
 
 bool Control::isBusy() const
@@ -1188,7 +1212,7 @@ void Control::addFrame(const uint8_t* data, uint32_t length, bool net, bool imm)
 
     uint32_t fifoSpace = m_modem->getP25Space();
 
-    //LogDebug(LOG_P25, "addFrame() fifoSpace = %u", fifoSpace);
+    // LogDebugEx(LOG_P25, "Control::addFrame()", "fifoSpace = %u", fifoSpace);
 
     // is this immediate data?
     if (imm) {
@@ -1266,6 +1290,7 @@ void Control::processNetwork()
 
     bool grantDemand = (buffer[14U] & 0x80U) == 0x80U;
     bool grantDenial = (buffer[14U] & 0x40U) == 0x40U;
+    bool grantEncrypt = (buffer[14U] & 0x08U) == 0x08U;
     bool unitToUnit = (buffer[14U] & 0x01U) == 0x01U;
 
     // process network message header
@@ -1310,7 +1335,7 @@ void Control::processNetwork()
         }
 
         if (!m_dedicatedControl)
-            ret = m_data->processNetwork(data.get(), frameLength, blockLength);
+            m_data->processNetwork(data.get(), frameLength, blockLength);
 
         return;
     }
@@ -1407,7 +1432,7 @@ void Control::processNetwork()
                 break;
             }
 
-            ret = m_voice->processNetwork(data.get(), frameLength, control, lsd, duid, frameType);
+            m_voice->processNetwork(data.get(), frameLength, control, lsd, duid, frameType);
             break;
 
         case DUID::TDU:
@@ -1434,12 +1459,15 @@ void Control::processNetwork()
                     return;
                 }
 
+                if (grantEncrypt)
+                    control.setEncrypted(true); // make sure encrypted flag is set
+
                 uint8_t serviceOptions = (control.getEmergency() ? 0x80U : 0x00U) +     // Emergency Flag
                     (control.getEncrypted() ? 0x40U : 0x00U) +                          // Encrypted Flag
                     (control.getPriority() & 0x07U);                                    // Priority
 
                 if (m_verbose) {
-                    LogMessage(LOG_NET, P25_TSDU_STR " remote grant demand, srcId = %u, dstId = %u, unitToUnit = %u", srcId, dstId, unitToUnit);
+                    LogMessage(LOG_NET, P25_TSDU_STR " remote grant demand, srcId = %u, dstId = %u, unitToUnit = %u, encrypted = %u", srcId, dstId, unitToUnit, grantEncrypt);
                 }
 
                 // are we denying the grant?
@@ -1534,6 +1562,43 @@ void Control::processFrameLoss()
     if (m_voiceOnControl && m_ccHalted) {
         m_ccHalted = false;
         writeRF_ControlData();
+    }
+}
+
+/* Helper to process an In-Call Control message. */
+
+void Control::processInCallCtrl(network::NET_ICC::ENUM command, uint32_t dstId)
+{
+    switch (command) {
+    case network::NET_ICC::REJECT_TRAFFIC:
+        {
+            if (m_rfState == RS_RF_AUDIO && m_voice->m_rfLC.getDstId() == dstId) {
+                LogWarning(LOG_P25, "network requested in-call traffic reject, dstId = %u", dstId);
+                if (m_affiliations.isGranted(dstId)) {
+                    uint32_t srcId = m_affiliations.getGrantedSrcId(dstId);
+
+                    m_affiliations.releaseGrant(dstId, false);
+                    if (!m_enableControl) {
+                        notifyCC_ReleaseGrant(dstId);
+                    }
+                    m_control->writeNet_TSDU_Call_Term(srcId, dstId);
+
+                    m_voice->m_rfLC.setSrcId(srcId);
+                    m_voice->m_rfLC.setDstId(dstId);
+                }
+
+                processFrameLoss();
+
+                m_rfLastDstId = 0U;
+                m_rfLastSrcId = 0U;
+                m_rfTGHang.stop();
+                m_rfState = RS_RF_REJECTED;
+            }
+        }
+        break;
+
+    default:
+        break;
     }
 }
 
@@ -1678,10 +1743,6 @@ void Control::writeRF_Nulls()
 
     data[0U] = modem::TAG_EOT;
     data[1U] = 0x00U;
-
-    if (m_debug) {
-        LogDebug(LOG_P25, "writeRF_Nulls()");
-    }
 
     addFrame(data, NULLS_LENGTH_BYTES + 2U);
 }

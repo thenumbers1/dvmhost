@@ -31,6 +31,7 @@
 #include "common/lookups/IdenTableLookup.h"
 #include "common/lookups/RadioIdLookup.h"
 #include "common/lookups/TalkgroupRulesLookup.h"
+#include "common/network/RTPFNEHeader.h"
 #include "common/p25/SiteData.h"
 #include "common/RingBuffer.h"
 #include "common/StopWatch.h"
@@ -65,7 +66,7 @@ namespace p25
     // ---------------------------------------------------------------------------
 
     /**
-     * @brief This class implements core logic for handling P25.
+     * @brief This class implements core controller logic for handling P25.
      * @ingroup host_p25
      */
     class HOST_SW_API Control {
@@ -239,6 +240,16 @@ namespace p25
         lookups::P25AffiliationLookup affiliations() { return m_affiliations; }
 
         /**
+         * @brief Returns the current operating RF state of the P25 controller.
+         * @returns RPT_RF_STATE 
+         */
+        RPT_RF_STATE getRFState() const { return m_rfState; }
+        /**
+         * @brief Clears the current operating RF state back to idle.
+         */
+        void clearRFReject();
+
+        /**
          * @brief Flag indicating whether the processor or is busy or not.
          * @returns bool True, if processor is busy, otherwise false.
          */
@@ -398,6 +409,12 @@ namespace p25
          * @brief Helper to process loss of frame stream from modem.
          */
         void processFrameLoss();
+        /**
+         * @brief Helper to process an In-Call Control message.
+         * @param command In-Call Control Command.
+         * @param dstId Destination ID.
+         */
+        void processInCallCtrl(network::NET_ICC::ENUM command, uint32_t dstId);
 
         /**
          * @brief Helper to send a REST API request to the CC to release a channel grant at the end of a call.

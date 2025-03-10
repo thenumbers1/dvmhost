@@ -5,7 +5,7 @@
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  *  Copyright (C) 2015,2016,2017 Jonathan Naylor, G4KLX
- *  Copyright (C) 2017-2024 Bryan Biedenkapp, N2PLL
+ *  Copyright (C) 2017-2025 Bryan Biedenkapp, N2PLL
  *
  */
 #include "Defines.h"
@@ -71,7 +71,10 @@ Network::Network(const std::string& address, uint16_t port, uint16_t localPort, 
     m_restApiPort(0),
     m_conventional(false),
     m_remotePeerId(0U),
-    m_promiscuousPeer(false)
+    m_promiscuousPeer(false),
+    m_dmrInCallCallback(nullptr),
+    m_p25InCallCallback(nullptr),
+    m_nxdnInCallCallback(nullptr)
 {
     assert(!address.empty());
     assert(port > 0U);
@@ -226,7 +229,7 @@ void Network::clock(uint32_t ms)
         }
 
         if (m_debug) {
-            LogDebug(LOG_NET, "RTP, peerId = %u, seq = %u, streamId = %u, func = %02X, subFunc = %02X", fneHeader.getPeerId(), rtpHeader.getSequence(),
+            LogDebugEx(LOG_NET, "Network::clock()", "RTP, peerId = %u, seq = %u, streamId = %u, func = %02X, subFunc = %02X", fneHeader.getPeerId(), rtpHeader.getSequence(),
                 fneHeader.getStreamId(), fneHeader.getFunction(), fneHeader.getSubFunction());
         }
 
@@ -262,25 +265,47 @@ void Network::clock(uint32_t ms)
             {
                 if (fneHeader.getSubFunction() == NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR) {              // Encapsulated DMR data frame
                     if (m_enabled && m_dmrEnabled) {
-                        uint32_t slotNo = (buffer[15U] & 0x80U) == 0x80U ? 2U : 1U;
-                        if (m_rxDMRStreamId[slotNo] == 0U) {
+                        uint32_t slotNo = (buffer[15U] & 0x80U) == 0x80U ? 1U : 0U; // this is the raw index for the stream ID array
+
+                        if (m_debug) {
+                            LogDebug(LOG_NET, "DMR Slot %u, peer = %u, len = %u, pktSeq = %u, streamId = %u", 
+                                slotNo + 1U, peerId, length, rtpHeader.getSequence(), streamId);
+                        }
+
+                        if (m_promiscuousPeer) {
                             m_rxDMRStreamId[slotNo] = streamId;
                             m_pktLastSeq = m_pktSeq;
                         }
                         else {
-                            if (m_rxDMRStreamId[slotNo] == streamId) {
-                                if (m_pktSeq != 0U && m_pktLastSeq != 0U) {
-                                    if (m_pktSeq >= 1U && ((m_pktSeq != m_pktLastSeq + 1) && (m_pktSeq - 1 != m_pktLastSeq + 1))) {
-                                        LogWarning(LOG_NET, "DMR Stream %u out-of-sequence; %u != %u", streamId, m_pktSeq, m_pktLastSeq + 1);
-                                    }
+                            if (m_rxDMRStreamId[slotNo] == 0U) {
+                                if (rtpHeader.getSequence() == RTP_END_OF_CALL_SEQ) {
+                                    m_rxDMRStreamId[slotNo] = 0U;
                                 }
-        
+                                else {
+                                    m_rxDMRStreamId[slotNo] = streamId;
+                                }
+
                                 m_pktLastSeq = m_pktSeq;
                             }
+                            else {
+                                if (m_rxDMRStreamId[slotNo] == streamId) {
+                                    if (m_pktSeq != 0U && m_pktLastSeq != 0U) {
+                                        if (m_pktSeq >= 1U && ((m_pktSeq != m_pktLastSeq + 1) && (m_pktSeq - 1 != m_pktLastSeq + 1))) {
+                                            LogWarning(LOG_NET, "DMR Stream %u out-of-sequence; %u != %u", streamId, m_pktSeq, m_pktLastSeq + 1);
+                                        }
+                                    }
+
+                                    m_pktLastSeq = m_pktSeq;
+                                }
+
+                                if (rtpHeader.getSequence() == RTP_END_OF_CALL_SEQ) {
+                                    m_rxDMRStreamId[slotNo] = 0U;
+                                }
+                            }
                         }
-                       
+
                         if (m_debug)
-                            Utils::dump(1U, "Network Received, DMR", buffer.get(), length);
+                            Utils::dump(1U, "[Network::clock()] Network Received, DMR", buffer.get(), length);
                         if (length > 255)
                             LogError(LOG_NET, "DMR Stream %u, frame oversized? this shouldn't happen, pktSeq = %u, len = %u", streamId, m_pktSeq, length);
 
@@ -291,24 +316,45 @@ void Network::clock(uint32_t ms)
                 }
                 else if (fneHeader.getSubFunction() == NET_SUBFUNC::PROTOCOL_SUBFUNC_P25) {         // Encapsulated P25 data frame
                     if (m_enabled && m_p25Enabled) {
-                        if (m_rxP25StreamId == 0U) {
+                        if (m_debug) {
+                            LogDebug(LOG_NET, "P25, peer = %u, len = %u, pktSeq = %u, streamId = %u", 
+                                peerId, length, rtpHeader.getSequence(), streamId);
+                        }
+
+                        if (m_promiscuousPeer) {
                             m_rxP25StreamId = streamId;
                             m_pktLastSeq = m_pktSeq;
                         }
                         else {
-                            if (m_rxP25StreamId == streamId) {
-                                if (m_pktSeq != 0U && m_pktLastSeq != 0U) {
-                                    if (m_pktSeq >= 1U && ((m_pktSeq != m_pktLastSeq + 1) && (m_pktSeq - 1 != m_pktLastSeq + 1))) {
-                                        LogWarning(LOG_NET, "P25 Stream %u out-of-sequence; %u != %u", streamId, m_pktSeq, m_pktLastSeq + 1);
-                                    }
+                            if (m_rxP25StreamId == 0U) {
+                                if (rtpHeader.getSequence() == RTP_END_OF_CALL_SEQ) {
+                                    m_rxP25StreamId = 0U;
                                 }
-        
+                                else {
+                                    m_rxP25StreamId = streamId;
+                                }
+
                                 m_pktLastSeq = m_pktSeq;
+                            }
+                            else {
+                                if (m_rxP25StreamId == streamId) {
+                                    if (m_pktSeq != 0U && m_pktLastSeq != 0U) {
+                                        if (m_pktSeq >= 1U && ((m_pktSeq != m_pktLastSeq + 1) && (m_pktSeq - 1 != m_pktLastSeq + 1))) {
+                                            LogWarning(LOG_NET, "P25 Stream %u out-of-sequence; %u != %u", streamId, m_pktSeq, m_pktLastSeq + 1);
+                                        }
+                                    }
+
+                                    m_pktLastSeq = m_pktSeq;
+                                }
+
+                                if (rtpHeader.getSequence() == RTP_END_OF_CALL_SEQ) {
+                                    m_rxP25StreamId = 0U;
+                                }
                             }
                         }
 
                         if (m_debug)
-                            Utils::dump(1U, "Network Received, P25", buffer.get(), length);
+                            Utils::dump(1U, "[Network::clock()] Network Received, P25", buffer.get(), length);
                         if (length > 255)
                             LogError(LOG_NET, "P25 Stream %u, frame oversized? this shouldn't happen, pktSeq = %u, len = %u", streamId, m_pktSeq, length);
 
@@ -319,24 +365,45 @@ void Network::clock(uint32_t ms)
                 }
                 else if (fneHeader.getSubFunction() == NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN) {        // Encapsulated NXDN data frame
                     if (m_enabled && m_nxdnEnabled) {
-                        if (m_rxNXDNStreamId == 0U) {
+                        if (m_debug) {
+                            LogDebug(LOG_NET, "NXDN, peer = %u, len = %u, pktSeq = %u, streamId = %u", 
+                                peerId, length, rtpHeader.getSequence(), streamId);
+                        }
+
+                        if (m_promiscuousPeer) {
                             m_rxNXDNStreamId = streamId;
                             m_pktLastSeq = m_pktSeq;
                         }
                         else {
-                            if (m_rxNXDNStreamId == streamId) {
-                                if (m_pktSeq != 0U && m_pktLastSeq != 0U) {
-                                    if (m_pktSeq >= 1U && ((m_pktSeq != m_pktLastSeq + 1) && (m_pktSeq - 1 != m_pktLastSeq + 1))) {
-                                        LogWarning(LOG_NET, "NXDN Stream %u out-of-sequence; %u != %u", streamId, m_pktSeq, m_pktLastSeq + 1);
-                                    }
+                            if (m_rxNXDNStreamId == 0U) {
+                                if (rtpHeader.getSequence() == RTP_END_OF_CALL_SEQ) {
+                                    m_rxNXDNStreamId = 0U;
                                 }
-        
+                                else {
+                                    m_rxNXDNStreamId = streamId;
+                                }
+
                                 m_pktLastSeq = m_pktSeq;
+                            }
+                            else {
+                                if (m_rxNXDNStreamId == streamId) {
+                                    if (m_pktSeq != 0U && m_pktLastSeq != 0U) {
+                                        if (m_pktSeq >= 1U && ((m_pktSeq != m_pktLastSeq + 1) && (m_pktSeq - 1 != m_pktLastSeq + 1))) {
+                                            LogWarning(LOG_NET, "NXDN Stream %u out-of-sequence; %u != %u", streamId, m_pktSeq, m_pktLastSeq + 1);
+                                        }
+                                    }
+
+                                    m_pktLastSeq = m_pktSeq;
+                                }
+
+                                if (rtpHeader.getSequence() == RTP_END_OF_CALL_SEQ) {
+                                    m_rxNXDNStreamId = 0U;
+                                }
                             }
                         }
 
                         if (m_debug)
-                            Utils::dump(1U, "Network Received, NXDN", buffer.get(), length);
+                            Utils::dump(1U, "[Network::clock()] Network Received, NXDN", buffer.get(), length);
                         if (length > 255)
                             LogError(LOG_NET, "NXDN Stream %u, frame oversized? this shouldn't happen, pktSeq = %u, len = %u", streamId, m_pktSeq, length);
 
@@ -440,7 +507,7 @@ void Network::clock(uint32_t ms)
                                 offs += 5U;
                             }
 
-                            LogMessage(LOG_NET, "Activated %u TGs; loaded %u entries into lookup table", len, m_tidLookup->groupVoice().size());
+                            LogMessage(LOG_NET, "Activated %u TGs; loaded %u entries into talkgroup rules table", len, m_tidLookup->groupVoice().size());
 
                             // save if saving from network is enabled
                             if (m_saveLookup && len > 0) {
@@ -471,7 +538,7 @@ void Network::clock(uint32_t ms)
                                 offs += 5U;
                             }
 
-                            LogMessage(LOG_NET, "Deactivated %u TGs; loaded %u entries into lookup table", len, m_tidLookup->groupVoice().size());
+                            LogMessage(LOG_NET, "Deactivated %u TGs; loaded %u entries into talkgroup rules table", len, m_tidLookup->groupVoice().size());
 
                             // save if saving from network is enabled
                             if (m_saveLookup && len > 0) {
@@ -482,6 +549,45 @@ void Network::clock(uint32_t ms)
                 }
                 else {
                     Utils::dump("unknown master control opcode from the master", buffer.get(), length);
+                }
+            }
+            break;
+
+        case NET_FUNC::INCALL_CTRL:
+            {
+                if (fneHeader.getSubFunction() == NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR) {              // DMR In-Call Control
+                    if (m_enabled && m_dmrEnabled) {
+                        NET_ICC::ENUM command = (NET_ICC::ENUM)buffer[10U];
+                        uint32_t dstId = __GET_UINT16(buffer, 11U);
+                        uint8_t slot = buffer[14U];
+
+                        if (m_dmrInCallCallback != nullptr) {
+                            m_dmrInCallCallback(command, dstId, slot);
+                        }
+                    }
+                }
+                else if (fneHeader.getSubFunction() == NET_SUBFUNC::PROTOCOL_SUBFUNC_P25) {         // P25 In-Call Control
+                    if (m_enabled && m_p25Enabled) {
+                        NET_ICC::ENUM command = (NET_ICC::ENUM)buffer[10U];
+                        uint32_t dstId = __GET_UINT16(buffer, 11U);
+
+                        if (m_p25InCallCallback != nullptr) {
+                            m_p25InCallCallback(command, dstId);
+                        }
+                    }
+                }
+                else if (fneHeader.getSubFunction() == NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN) {        // NXDN In-Call Control
+                    if (m_enabled && m_nxdnEnabled) {
+                        NET_ICC::ENUM command = (NET_ICC::ENUM)buffer[10U];
+                        uint32_t dstId = __GET_UINT16(buffer, 11U);
+
+                        if (m_nxdnInCallCallback != nullptr) {
+                            m_nxdnInCallCallback(command, dstId);
+                        }
+                    }
+                }
+                else {
+                    Utils::dump("unknown protocol opcode from the master", buffer.get(), length);
                 }
             }
             break;
@@ -548,7 +654,7 @@ void Network::clock(uint32_t ms)
             {
                 switch (m_status) {
                     case NET_STAT_WAITING_LOGIN:
-                        LogDebug(LOG_NET, "PEER %u RPTL ACK, performing login exchange, remotePeerId = %u", m_peerId, rtpHeader.getSSRC());
+                        LogMessage(LOG_NET, "PEER %u RPTL ACK, performing login exchange, remotePeerId = %u", m_peerId, rtpHeader.getSSRC());
 
                         ::memcpy(m_salt, buffer.get() + 6U, sizeof(uint32_t));
                         writeAuthorisation();
@@ -558,7 +664,7 @@ void Network::clock(uint32_t ms)
                         m_retryTimer.start();
                         break;
                     case NET_STAT_WAITING_AUTHORISATION:
-                        LogDebug(LOG_NET, "PEER %u RPTK ACK, performing configuration exchange, remotePeerId = %u", m_peerId, rtpHeader.getSSRC());
+                        LogMessage(LOG_NET, "PEER %u RPTK ACK, performing configuration exchange, remotePeerId = %u", m_peerId, rtpHeader.getSSRC());
 
                         writeConfig();
 
@@ -669,7 +775,7 @@ bool Network::open()
         LogMessage(LOG_NET, "PEER %u opening network", m_peerId);
 
     if (udp::Socket::lookup(m_address, m_port, m_addr, m_addrLen) != 0) {
-        LogMessage(LOG_NET, "Could not lookup the address of the master");
+        LogMessage(LOG_NET, "!!! Could not lookup the address of the master!");
         return false;
     }
 

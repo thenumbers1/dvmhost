@@ -197,6 +197,7 @@ bool TagDMRData::processFrame(const uint8_t* data, uint32_t len, uint32_t peerId
                         .request(m_network->m_influxServer);
                 }
 
+                m_network->eraseStreamPktSeq(peerId, streamId);
                 m_network->m_callInProgress = false;
             }
         }
@@ -767,6 +768,33 @@ bool TagDMRData::validate(uint32_t peerId, data::NetData& data, uint32_t streamI
                     .request(m_network->m_influxServer);
             }
 
+            // report In-Call Control to the peer sending traffic
+            m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR, NET_ICC::REJECT_TRAFFIC, data.getDstId(), data.getSlotNo());
+            return false;
+        }
+    }
+    else {
+        // if this is a default radio -- and we are rejecting undefined radios
+        // report call error
+        if (m_network->m_rejectUnknownRID) {
+            // report error event to InfluxDB
+            if (m_network->m_enableInfluxDB) {
+                influxdb::QueryBuilder()
+                    .meas("call_error_event")
+                        .tag("peerId", std::to_string(peerId))
+                        .tag("streamId", std::to_string(streamId))
+                        .tag("srcId", std::to_string(data.getSrcId()))
+                        .tag("dstId", std::to_string(data.getDstId()))
+                            .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
+                            .field("slot", data.getSlotNo())
+                        .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                    .request(m_network->m_influxServer);
+            }
+
+            LogWarning(LOG_NET, "DMR slot %s, illegal/unknown RID attempted access, srcId = %u, dstId = %u", data.getSlotNo(), data.getSrcId(), data.getDstId());
+
+            // report In-Call Control to the peer sending traffic
+            m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR, NET_ICC::REJECT_TRAFFIC, data.getDstId(), data.getSlotNo());
             return false;
         }
     }
@@ -798,6 +826,31 @@ bool TagDMRData::validate(uint32_t peerId, data::NetData& data, uint32_t streamI
                 return false;
             }
         }
+        else {
+            // if this is a default radio -- and we are rejecting undefined radios
+            // report call error
+            if (m_network->m_rejectUnknownRID) {
+                // report error event to InfluxDB
+                if (m_network->m_enableInfluxDB) {
+                    influxdb::QueryBuilder()
+                        .meas("call_error_event")
+                            .tag("peerId", std::to_string(peerId))
+                            .tag("streamId", std::to_string(streamId))
+                            .tag("srcId", std::to_string(data.getSrcId()))
+                            .tag("dstId", std::to_string(data.getDstId()))
+                                .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
+                                .field("slot", data.getSlotNo())
+                            .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                        .request(m_network->m_influxServer);
+                }
+
+                LogWarning(LOG_NET, "DMR slot %s, illegal/unknown RID attempted access, srcId = %u, dstId = %u", data.getSlotNo(), data.getSrcId(), data.getDstId());
+
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR, NET_ICC::REJECT_TRAFFIC, data.getDstId(), data.getSlotNo());
+                return false;
+            }
+        }
     }
 
     // is this a group call?
@@ -818,7 +871,19 @@ bool TagDMRData::validate(uint32_t peerId, data::NetData& data, uint32_t streamI
                     .request(m_network->m_influxServer);
             }
 
+            // report In-Call Control to the peer sending traffic
+            m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR, NET_ICC::REJECT_TRAFFIC, data.getDstId(),  data.getSlotNo());
             return false;
+        }
+
+        // peer always send list takes priority over any following affiliation rules
+        bool isAlwaysPeer = false;
+        std::vector<uint32_t> alwaysSend = tg.config().alwaysSend();
+        if (alwaysSend.size() > 0) {
+            auto it = std::find(alwaysSend.begin(), alwaysSend.end(), peerId);
+            if (it != alwaysSend.end()) {
+                isAlwaysPeer = true; // skip any following checks and always send traffic
+            }
         }
 
         // check the DMR slot number
@@ -837,9 +902,12 @@ bool TagDMRData::validate(uint32_t peerId, data::NetData& data, uint32_t streamI
                     .request(m_network->m_influxServer);
             }
 
+            // report In-Call Control to the peer sending traffic
+            m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR, NET_ICC::REJECT_TRAFFIC, data.getDstId(), data.getSlotNo());
             return false;
         }
 
+        // is the TGID active?
         if (!tg.config().active()) {
             // report error event to InfluxDB
             if (m_network->m_enableInfluxDB) {
@@ -855,7 +923,36 @@ bool TagDMRData::validate(uint32_t peerId, data::NetData& data, uint32_t streamI
                     .request(m_network->m_influxServer);
             }
 
+            // report In-Call Control to the peer sending traffic
+            m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR, NET_ICC::REJECT_TRAFFIC, data.getDstId(), data.getSlotNo());
             return false;
+        }
+
+        // always peers can violate the rules...hurray
+        if (!isAlwaysPeer) {
+            // does the TGID have a permitted RID list?
+            if (tg.config().permittedRIDs().size() > 0) {
+                // does the transmitting RID have permission?
+                std::vector<uint32_t> permittedRIDs = tg.config().permittedRIDs();
+                if (std::find(permittedRIDs.begin(), permittedRIDs.end(), data.getSrcId()) == permittedRIDs.end()) {
+                    // report error event to InfluxDB
+                    if (m_network->m_enableInfluxDB) {
+                        influxdb::QueryBuilder()
+                            .meas("call_error_event")
+                                .tag("peerId", std::to_string(peerId))
+                                .tag("streamId", std::to_string(streamId))
+                                .tag("srcId", std::to_string(data.getSrcId()))
+                                .tag("dstId", std::to_string(data.getDstId()))
+                                    .field("message", INFLUXDB_ERRSTR_RID_NOT_PERMITTED)
+                                .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                            .request(m_network->m_influxServer);
+                    }
+
+                    // report In-Call Control to the peer sending traffic
+                    m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR, NET_ICC::REJECT_TRAFFIC, data.getDstId(), data.getSlotNo());
+                    return false;
+                }
+            }
         }
     }
 
@@ -982,7 +1079,7 @@ void TagDMRData::write_CSBK(uint32_t peerId, uint8_t slot, lc::CSBK* csbk)
     }
 
     if (peerId > 0U) {
-        m_network->writePeer(peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR }, message.get(), messageLength, RTP_END_OF_CALL_SEQ, streamId, false, true);
+        m_network->writePeer(peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_DMR }, message.get(), messageLength, RTP_END_OF_CALL_SEQ, streamId, false);
     } else {
         // repeat traffic to the connected peers
         if (m_network->m_peers.size() > 0U) {

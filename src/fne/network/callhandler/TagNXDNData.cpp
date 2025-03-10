@@ -150,6 +150,7 @@ bool TagNXDNData::processFrame(const uint8_t* data, uint32_t len, uint32_t peerI
                             .request(m_network->m_influxServer);
                     }
 
+                    m_network->eraseStreamPktSeq(peerId, streamId);
                     m_network->m_callInProgress = false;
                 }
             }
@@ -573,6 +574,32 @@ bool TagNXDNData::validate(uint32_t peerId, lc::RTCH& lc, uint8_t messageType, u
                     .request(m_network->m_influxServer);
             }
 
+            // report In-Call Control to the peer sending traffic
+            m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN, NET_ICC::REJECT_TRAFFIC, lc.getDstId());
+            return false;
+        }
+    }
+    else {
+        // if this is a default radio -- and we are rejecting undefined radios
+        // report call error
+        if (m_network->m_rejectUnknownRID) {
+            // report error event to InfluxDB
+            if (m_network->m_enableInfluxDB) {
+                influxdb::QueryBuilder()
+                    .meas("call_error_event")
+                        .tag("peerId", std::to_string(peerId))
+                        .tag("streamId", std::to_string(streamId))
+                        .tag("srcId", std::to_string(lc.getSrcId()))
+                        .tag("dstId", std::to_string(lc.getDstId()))
+                            .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
+                        .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                    .request(m_network->m_influxServer);
+            }
+
+            LogWarning(LOG_NET, "NXDN, illegal/unknown RID attempted access, srcId = %u, dstId = %u", lc.getSrcId(), lc.getDstId());
+
+            // report In-Call Control to the peer sending traffic
+            m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN, NET_ICC::REJECT_TRAFFIC, lc.getDstId());
             return false;
         }
     }
@@ -600,6 +627,32 @@ bool TagNXDNData::validate(uint32_t peerId, lc::RTCH& lc, uint8_t messageType, u
                         .request(m_network->m_influxServer);
                 }
 
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN, NET_ICC::REJECT_TRAFFIC, lc.getDstId());
+                return false;
+            }
+        }
+        else {
+            // if this is a default radio -- and we are rejecting undefined radios
+            // report call error
+            if (m_network->m_rejectUnknownRID) {
+                // report error event to InfluxDB
+                if (m_network->m_enableInfluxDB) {
+                    influxdb::QueryBuilder()
+                        .meas("call_error_event")
+                            .tag("peerId", std::to_string(peerId))
+                            .tag("streamId", std::to_string(streamId))
+                            .tag("srcId", std::to_string(lc.getSrcId()))
+                            .tag("dstId", std::to_string(lc.getDstId()))
+                                .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
+                            .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                        .request(m_network->m_influxServer);
+                }
+
+                LogWarning(LOG_NET, "NXDN, illegal/unknown RID attempted access, srcId = %u, dstId = %u", lc.getSrcId(), lc.getDstId());
+
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN, NET_ICC::REJECT_TRAFFIC, lc.getDstId());
                 return false;
             }
         }
@@ -624,9 +677,22 @@ bool TagNXDNData::validate(uint32_t peerId, lc::RTCH& lc, uint8_t messageType, u
                 .request(m_network->m_influxServer);
         }
 
+        // report In-Call Control to the peer sending traffic
+        m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN, NET_ICC::REJECT_TRAFFIC, lc.getDstId());
         return false;
     }
 
+    // peer always send list takes priority over any following affiliation rules
+    bool isAlwaysPeer = false;
+    std::vector<uint32_t> alwaysSend = tg.config().alwaysSend();
+    if (alwaysSend.size() > 0) {
+        auto it = std::find(alwaysSend.begin(), alwaysSend.end(), peerId);
+        if (it != alwaysSend.end()) {
+            isAlwaysPeer = true; // skip any following checks and always send traffic
+        }
+    }
+
+    // is the TGID active?
     if (!tg.config().active()) {
         // report error event to InfluxDB
         if (m_network->m_enableInfluxDB) {
@@ -641,7 +707,36 @@ bool TagNXDNData::validate(uint32_t peerId, lc::RTCH& lc, uint8_t messageType, u
                 .request(m_network->m_influxServer);
         }
 
+        // report In-Call Control to the peer sending traffic
+        m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN, NET_ICC::REJECT_TRAFFIC, lc.getDstId());
         return false;
+    }
+
+    // always peers can violate the rules...hurray
+    if (!isAlwaysPeer) {
+        // does the TGID have a permitted RID list?
+        if (tg.config().permittedRIDs().size() > 0) {
+            // does the transmitting RID have permission?
+            std::vector<uint32_t> permittedRIDs = tg.config().permittedRIDs();
+            if (std::find(permittedRIDs.begin(), permittedRIDs.end(), lc.getSrcId()) == permittedRIDs.end()) {
+                // report error event to InfluxDB
+                if (m_network->m_enableInfluxDB) {
+                    influxdb::QueryBuilder()
+                        .meas("call_error_event")
+                            .tag("peerId", std::to_string(peerId))
+                            .tag("streamId", std::to_string(streamId))
+                            .tag("srcId", std::to_string(lc.getSrcId()))
+                            .tag("dstId", std::to_string(lc.getDstId()))
+                                .field("message", INFLUXDB_ERRSTR_RID_NOT_PERMITTED)
+                            .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                        .request(m_network->m_influxServer);
+                }
+
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN, NET_ICC::REJECT_TRAFFIC, lc.getDstId());
+                return false;
+            }
+        }
     }
 
     return true;
@@ -759,5 +854,5 @@ void TagNXDNData::write_Message(uint32_t peerId, lc::RCCH* rcch)
     }
 
     uint32_t streamId = m_network->createStreamId();
-    m_network->writePeer(peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN }, message.get(), messageLength, RTP_END_OF_CALL_SEQ, streamId, false, true);
+    m_network->writePeer(peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_NXDN }, message.get(), messageLength, RTP_END_OF_CALL_SEQ, streamId, false);
 }

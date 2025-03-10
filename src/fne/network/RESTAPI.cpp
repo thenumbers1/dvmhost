@@ -4,7 +4,7 @@
  * GPLv2 Open Source. Use is subject to license terms.
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
- *  Copyright (C) 2024 Bryan Biedenkapp, N2PLL
+ *  Copyright (C) 2024-2025 Bryan Biedenkapp, N2PLL
  *  Copyright (C) 2024 Patrick McDonnell, W3AXL
  *
  */
@@ -221,6 +221,16 @@ json::object tgToJson(const TalkgroupRuleGroupVoice& groupVoice)
             }
         }
         config["preferred"].set<json::array>(preferreds);
+
+        json::array permittedRIDs = json::array();
+        std::vector<uint32_t> permittedRID = groupVoice.config().permittedRIDs();
+        if (permittedRID.size() > 0) {
+            for (auto entry : permittedRID) {
+                uint32_t rid = entry;
+                permittedRIDs.push_back(json::value((double)rid));
+            }
+        }
+        config["permittedRids"].set<json::array>(permittedRIDs);
 
         tg["config"].set<json::object>(config);
     }
@@ -445,6 +455,27 @@ TalkgroupRuleGroupVoice jsonToTG(json::object& req, HTTPPayload& reply)
             config.preferred(preferred);
         }
 
+        if (!configObj["permittedRids"].is<json::array>()) {
+            errorPayload(reply, "TG configuration \"permittedRids\" was not a valid JSON array");
+            LogDebug(LOG_REST,  "TG configuration \"permittedRids\" was not a valid JSON array");
+            return TalkgroupRuleGroupVoice();
+        }
+        json::array permittedRIDs = configObj["permittedRids"].get<json::array>();
+
+        std::vector<uint32_t> permittedRID = groupVoice.config().permittedRIDs();
+        if (permittedRIDs.size() > 0) {
+            for (auto entry : permittedRIDs) {
+                if (!entry.is<uint32_t>()) {
+                    errorPayload(reply, "TG configuration permitted RID value was not a valid number");
+                    LogDebug(LOG_REST,  "TG configuration permitted RID value was not a valid number");
+                    return TalkgroupRuleGroupVoice();
+                }
+
+                permittedRID.push_back(entry.get<uint32_t>());
+            }
+            config.permittedRIDs(permittedRID);
+        }
+
         groupVoice.config(config);
     }
 
@@ -653,7 +684,7 @@ bool RESTAPI::validateAuth(const HTTPPayload& request, HTTPPayload& reply)
     std::string host = request.headers.find("RemoteHost");
     std::string headerToken = request.headers.find("X-DVM-Auth-Token");
 #if DEBUG_HTTP_PAYLOAD
-    ::LogDebug(LOG_REST, "RESTAPI::validateAuth() token, host = %s, token = %s", host.c_str(), headerToken.c_str());
+    ::LogDebugEx(LOG_REST, "RESTAPI::validateAuth()", "token, host = %s, token = %s", host.c_str(), headerToken.c_str());
 #endif
     if (headerToken.empty()) {
         errorPayload(reply, "no authentication token", HTTPPayload::UNAUTHORIZED);
@@ -662,11 +693,11 @@ bool RESTAPI::validateAuth(const HTTPPayload& request, HTTPPayload& reply)
 
     for (auto& token : m_authTokens) {
 #if DEBUG_HTTP_PAYLOAD
-        ::LogDebug(LOG_REST, "RESTAPI::validateAuth() valid list, host = %s, token = %s", token.first.c_str(), std::to_string(token.second).c_str());
+        ::LogDebugEx(LOG_REST, "RESTAPI::validateAuth()", "valid list, host = %s, token = %s", token.first.c_str(), std::to_string(token.second).c_str());
 #endif
         if (token.first.compare(host) == 0) {
 #if DEBUG_HTTP_PAYLOAD
-            ::LogDebug(LOG_REST, "RESTAPI::validateAuth() storedToken = %s, passedToken = %s", std::to_string(token.second).c_str(), headerToken.c_str());
+            ::LogDebugEx(LOG_REST, "RESTAPI::validateAuth()", "storedToken = %s, passedToken = %s", std::to_string(token.second).c_str(), headerToken.c_str());
 #endif
             if (std::to_string(token.second).compare(headerToken) == 0) {
                 return true;

@@ -296,6 +296,11 @@ void Control::setOptions(yaml::Node& conf, bool supervisor, const std::string cw
         }
     }
 
+    // set the In-Call Control function callback
+    if (m_network != nullptr) {
+        m_network->setNXDNICCCallback([=](network::NET_ICC::ENUM command, uint32_t dstId) { processInCallCtrl(command, dstId); });
+    }
+
     if (printOptions) {
         LogInfo("    Silence Threshold: %u (%.1f%%)", m_voice->m_silenceThreshold, float(m_voice->m_silenceThreshold) / 12.33F);
         LogInfo("    Frame Loss Threshold: %u", m_frameLossThreshold);
@@ -436,6 +441,10 @@ bool Control::processFrame(uint8_t* data, uint32_t len)
 
         return false;
     }
+
+    // if the controller is currently in an reject state; block any RF traffic
+    if (valid && m_rfState == RS_RF_REJECTED)
+        return false;
 
     RFChannelType::E rfct = m_rfLastLICH.getRFCT();
     FuncChannelType::E fct = m_rfLastLICH.getFCT();
@@ -688,19 +697,9 @@ void Control::clock()
         }
     }
 
-    // reset states if we're in a rejected state
-    if (m_rfState == RS_RF_REJECTED) {
-        m_txQueue.clear();
-
-        m_voice->resetRF();
-        m_voice->resetNet();
-
-        m_data->resetRF();
-
-        if (m_network != nullptr)
-            m_network->resetNXDN();
-
-        m_rfState = RS_RF_LISTENING;
+    // reset states if we're in a rejected state and we're a control channel
+    if (m_rfState == RS_RF_REJECTED && m_enableControl && m_dedicatedControl) {
+        clearRFReject();
     }
 
     if (m_frameLossCnt > 0U && m_rfState == RS_RF_LISTENING)
@@ -796,6 +795,25 @@ void Control::touchGrantTG(uint32_t dstId)
     }
 }
 
+/* Clears the current operating RF state back to idle. */
+
+void Control::clearRFReject()
+{
+    if (m_rfState == RS_RF_REJECTED) {
+        m_txQueue.clear();
+
+        m_voice->resetRF();
+        m_voice->resetNet();
+
+        m_data->resetRF();
+
+        if (m_network != nullptr)
+            m_network->resetNXDN();
+
+        m_rfState = RS_RF_LISTENING;
+    }
+}
+
 /* Flag indicating whether the process or is busy or not. */
 
 bool Control::isBusy() const
@@ -877,7 +895,7 @@ void Control::addFrame(const uint8_t *data, bool net, bool imm)
 
     uint32_t fifoSpace = m_modem->getNXDNSpace();
 
-    //LogDebug(LOG_NXDN, "addFrame() fifoSpace = %u", fifoSpace);
+    //LogDebugEx(LOG_NXDN, "Control::addFrame()", "fifoSpace = %u", fifoSpace);
 
     // is this immediate data?
     if (imm) {
@@ -1030,6 +1048,37 @@ void Control::processFrameLoss()
 
     m_rfMask = 0x00U;
     m_rfLC.reset();
+}
+
+/* Helper to process an In-Call Control message. */
+
+void Control::processInCallCtrl(network::NET_ICC::ENUM command, uint32_t dstId)
+{
+    switch (command) {
+    case network::NET_ICC::REJECT_TRAFFIC:
+        {
+            if (m_rfState == RS_RF_AUDIO && m_rfLC.getDstId() == dstId) {
+                LogWarning(LOG_P25, "network requested in-call traffic reject, dstId = %u", dstId);
+                if (m_affiliations.isGranted(dstId)) {
+                    m_affiliations.releaseGrant(dstId, false);
+                    if (!m_enableControl) {
+                        notifyCC_ReleaseGrant(dstId);
+                    }
+                }
+
+                processFrameLoss();
+
+                m_rfLastDstId = 0U;
+                m_rfLastSrcId = 0U;
+                m_rfTGHang.stop();
+                m_rfState = RS_RF_REJECTED;
+            }
+        }
+        break;
+
+    default:
+        break;
+    }
 }
 
 /* Helper to send a REST API request to the CC to release a channel grant at the end of a call. */

@@ -49,7 +49,7 @@ void* Host::threadDMRReader1(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -57,13 +57,19 @@ void* Host::threadDMRReader1(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
 
+        StopWatch stopWatch;
+        stopWatch.start();
+
         if (host->m_dmr != nullptr) {
             while (!g_killed) {
+                uint32_t ms = stopWatch.elapsed();
+                stopWatch.start();
+
                 // scope is intentional
                 {
                     // ------------------------------------------------------
@@ -148,6 +154,23 @@ void* Host::threadDMRReader1(void* arg)
                                     LogWarning(LOG_HOST, "DMR modem data received, state = %u", host->m_state);
                                 }
                             }
+
+                            // were frames received while still in an In-Call reject state? if so, reset the timer
+                            if (host->m_dmr->getRFState(1U) == RS_RF_REJECTED) {
+                                host->m_dmr1RejectTimer.start();
+                                host->m_dmr1RejCnt++;
+                            }
+                        } else {
+                            // if we're receiving no more frames, and we're in a in-call reject state, clear the state
+                            if (host->m_dmr->getRFState(1U) == RS_RF_REJECTED) {
+                                host->m_dmr1RejectTimer.clock(ms);
+                                if (host->m_dmr1RejectTimer.hasExpired()) {
+                                    LogMessage(LOG_HOST, "DMR, slot 1 reset from previous call reject, frames = %u", host->m_dmr1RejCnt);
+                                    host->m_dmr1RejectTimer.stop();
+                                    host->m_dmr->clearRFReject(1U);
+                                    host->m_dmr1RejCnt = 0U;
+                                }
+                            }
                         }
                     }
                 }
@@ -159,7 +182,7 @@ void* Host::threadDMRReader1(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -182,7 +205,7 @@ void* Host::threadDMRWriter1(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -190,7 +213,7 @@ void* Host::threadDMRWriter1(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -288,7 +311,7 @@ void* Host::threadDMRWriter1(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -311,7 +334,7 @@ void* Host::threadDMRReader2(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -319,13 +342,19 @@ void* Host::threadDMRReader2(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
 
+        StopWatch stopWatch;
+        stopWatch.start();
+
         if (host->m_dmr != nullptr) {
             while (!g_killed) {
+                uint32_t ms = stopWatch.elapsed();
+                stopWatch.start();
+
                 // scope is intentional
                 {
                     // ------------------------------------------------------
@@ -409,6 +438,23 @@ void* Host::threadDMRReader2(void* arg)
                                     LogWarning(LOG_HOST, "DMR modem data received, state = %u", host->m_state);
                                 }
                             }
+
+                            // were frames received while still in an In-Call reject state? if so, reset the timer
+                            if (host->m_dmr->getRFState(2U) == RS_RF_REJECTED) {
+                                host->m_dmr2RejectTimer.start();
+                                host->m_dmr2RejCnt++;
+                            }
+                        } else {
+                            // if we're receiving no more frames, and we're in a in-call reject state, clear the state
+                            if (host->m_dmr->getRFState(2U) == RS_RF_REJECTED) {
+                                host->m_dmr2RejectTimer.clock(ms);
+                                if (host->m_dmr2RejectTimer.hasExpired()) {
+                                    LogMessage(LOG_HOST, "DMR, slot 2 reset from previous in-call reject, frames = %u", host->m_dmr2RejCnt);
+                                    host->m_dmr2RejectTimer.stop();
+                                    host->m_dmr->clearRFReject(2U);
+                                    host->m_dmr2RejCnt = 0U;
+                                }
+                            }
                         }
                     }
                 }
@@ -420,7 +466,7 @@ void* Host::threadDMRReader2(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -443,7 +489,7 @@ void* Host::threadDMRWriter2(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -451,7 +497,7 @@ void* Host::threadDMRWriter2(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -549,7 +595,7 @@ void* Host::threadDMRWriter2(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 

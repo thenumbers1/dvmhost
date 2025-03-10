@@ -319,6 +319,7 @@ bool TalkgroupRulesLookup::load()
         uint32_t rewrCount = groupVoice.config().rewrite().size();
         uint32_t alwyCount = groupVoice.config().alwaysSend().size();
         uint32_t prefCount = groupVoice.config().preferred().size();
+        uint32_t permRIDCount = groupVoice.config().permittedRIDs().size();
 
         if (incCount > 0 && excCount > 0) {
             ::LogWarning(LOG_HOST, "Talkgroup (%s) defines both inclusions and exclusions! Inclusion rules take precedence and exclusion rules will be ignored.", groupName.c_str());
@@ -328,14 +329,14 @@ bool TalkgroupRulesLookup::load()
             ::LogWarning(LOG_HOST, "Talkgroup (%s) is marked as affiliation required and has a defined always send list! Always send peers take rule precedence and defined peers will always receive traffic.", groupName.c_str());
         }
 
-        ::LogInfoEx(LOG_HOST, "Talkgroup NAME: %s SRC_TGID: %u SRC_TS: %u ACTIVE: %u PARROT: %u AFFILIATED: %u INCLUSIONS: %u EXCLUSIONS: %u REWRITES: %u ALWAYS: %u PREFERRED: %u", groupName.c_str(), tgId, tgSlot, active, parrot, affil, incCount, excCount, rewrCount, alwyCount, prefCount);
+        ::LogInfoEx(LOG_HOST, "Talkgroup NAME: %s SRC_TGID: %u SRC_TS: %u ACTIVE: %u PARROT: %u AFFILIATED: %u INCLUSIONS: %u EXCLUSIONS: %u REWRITES: %u ALWAYS: %u PREFERRED: %u PERMITTED RIDS: %u", groupName.c_str(), tgId, tgSlot, active, parrot, affil, incCount, excCount, rewrCount, alwyCount, prefCount, permRIDCount);
     }
 
     size_t size = m_groupVoice.size();
     if (size == 0U)
         return false;
 
-    LogInfoEx(LOG_HOST, "Loaded %u entries into lookup table", size);
+    LogInfoEx(LOG_HOST, "Loaded %lu entries into talkgroup rules table", size);
 
     return true;
 }
@@ -358,10 +359,10 @@ bool TalkgroupRulesLookup::save()
     for (auto entry : m_groupVoice) {
         yaml::Node& gv = groupVoiceList.push_back();
         entry.getYaml(gv);
-        //LogDebug(LOG_HOST, "Added TGID %s to yaml TG list", gv["name"].as<std::string>().c_str());
+        //LogDebugEx(LOG_HOST, "TalkgroupRulesLookup::save()", "Added TGID %s to yaml TG list", gv["name"].as<std::string>().c_str());
     }
 
-    //LogDebug(LOG_HOST, "Got final GroupVoiceList YAML size of %u", groupVoiceList.size());
+    //LogDebugEx(LOG_HOST, "TalkgroupRulesLookup::save()", "Got final GroupVoiceList YAML size of %u", groupVoiceList.size());
     
     // Set the new rules
     newRules["groupVoice"] = groupVoiceList;
@@ -373,7 +374,7 @@ bool TalkgroupRulesLookup::save()
     }
 
     try {
-        //LogDebug(LOG_HOST, "Saving TGID file to %s", m_rulesFile.c_str());
+        LogMessage(LOG_HOST, "Saving talkgroup rules file to %s", m_rulesFile.c_str());
         yaml::Serialize(newRules, m_rulesFile.c_str());
         LogDebug(LOG_HOST, "Saved TGID config file to %s", m_rulesFile.c_str());
     }

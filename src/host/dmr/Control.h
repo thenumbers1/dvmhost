@@ -5,7 +5,7 @@
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  *  Copyright (C) 2015,2016,2017 Jonathan Naylor, G4KLX
- *  Copyright (C) 2017,2020-2023 Bryan Biedenkapp, N2PLL
+ *  Copyright (C) 2017,2020-2025 Bryan Biedenkapp, N2PLL
  *
  */
 /**
@@ -31,6 +31,7 @@
 #include "common/lookups/IdenTableLookup.h"
 #include "common/lookups/RadioIdLookup.h"
 #include "common/lookups/TalkgroupRulesLookup.h"
+#include "common/network/RTPFNEHeader.h"
 #include "common/yaml/Yaml.h"
 #include "dmr/lookups/DMRAffiliationLookup.h"
 #include "dmr/Slot.h"
@@ -51,7 +52,7 @@ namespace dmr
     // ---------------------------------------------------------------------------
 
     /**
-     * @brief This class implements core logic for handling DMR.
+     * @brief This class implements core controller logic for handling DMR.
      * @ingroup host_dmr
      */
     class HOST_SW_API Control {
@@ -215,6 +216,18 @@ namespace dmr
         lookups::DMRAffiliationLookup* affiliations();
 
         /**
+         * @brief Returns the current operating RF state of the DMR controller.
+         * @param slotNo DMR slot number.
+         * @returns RPT_RF_STATE 
+         */
+        RPT_RF_STATE getRFState(uint32_t slotNo) const;
+        /**
+         * @brief Clears the current operating RF state back to idle (with no data reset!).
+         * @param slotNo DMR slot number.
+         */
+        void clearRFReject(uint32_t slotNo);
+
+        /**
          * @brief Helper to return the slot carrying the TSCC.
          * @returns Slot* Instance of Slot carrying the TSCC.
          */
@@ -330,6 +343,13 @@ namespace dmr
          * @brief Process a data frames from the network.
          */
         void processNetwork();
+        /**
+         * @brief Helper to process an In-Call Control message.
+         * @param command In-Call Control Command.
+         * @param dstId Destination ID.
+         * @param slotNo DMR slot.
+         */
+        void processInCallCtrl(network::NET_ICC::ENUM command, uint32_t dstId, uint8_t slotNo);
     };
 } // namespace dmr
 

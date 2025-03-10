@@ -223,6 +223,7 @@ bool TagP25Data::processFrame(const uint8_t* data, uint32_t len, uint32_t peerId
                                 .request(m_network->m_influxServer);
                         }
 
+                        m_network->eraseStreamPktSeq(peerId, streamId);
                         m_network->m_callInProgress = false;
                     }
                 }
@@ -494,12 +495,14 @@ void TagP25Data::playbackParrot()
                 if (message != nullptr) {
                     if (m_network->m_parrotOnlyOriginating) {
                         LogMessage(LOG_NET, "P25, Parrot Grant Demand, peer = %u, srcId = %u, dstId = %u", pkt.peerId, srcId, dstId);
-                        m_network->writePeer(pkt.peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength, 0U, false);
+                        m_network->writePeer(pkt.peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength,
+                            RTP_END_OF_CALL_SEQ, m_network->createStreamId(), false);
                     } else {
                         // repeat traffic to the connected peers
                         for (auto peer : m_network->m_peers) {
                             LogMessage(LOG_NET, "P25, Parrot Grant Demand, peer = %u, srcId = %u, dstId = %u", peer.first, srcId, dstId);
-                            m_network->writePeer(peer.first, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength, 0U, false);
+                            m_network->writePeer(peer.first, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength, 
+                                RTP_END_OF_CALL_SEQ, m_network->createStreamId(), false);
                         }
                     }
                 }
@@ -1064,24 +1067,59 @@ bool TagP25Data::isPeerPermitted(uint32_t peerId, lc::LC& control, DUID::E duid,
 
 bool TagP25Data::validate(uint32_t peerId, lc::LC& control, DUID::E duid, const p25::lc::TSBK* tsbk, uint32_t streamId)
 {
-    // is the source ID a blacklisted ID?
-    lookups::RadioId rid = m_network->m_ridLookup->find(control.getSrcId());
-    if (!rid.radioDefault()) {
-        if (!rid.radioEnabled()) {
-            // report error event to InfluxDB
-            if (m_network->m_enableInfluxDB) {
-                influxdb::QueryBuilder()
-                    .meas("call_error_event")
-                        .tag("peerId", std::to_string(peerId))
-                        .tag("streamId", std::to_string(streamId))
-                        .tag("srcId", std::to_string(control.getSrcId()))
-                        .tag("dstId", std::to_string(control.getDstId()))
-                            .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
-                        .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
-                    .request(m_network->m_influxServer);
-            }
+    bool skipRidCheck = false;
+    if ((control.getMFId() == MFG_MOT && control.getSrcId() == 0U) || control.getSrcId() > WUID_FNE) {
+        skipRidCheck = true;
+    }
 
-            return false;
+    //LogDebug(LOG_NET, "P25, duid = $%02X, mfId = $%02X, lco = $%02X, srcId = %u, dstId = %u", duid, control.getMFId(), control.getLCO(), control.getSrcId(), control.getDstId());
+
+    // is the source ID a blacklisted ID?
+    if (!skipRidCheck) {
+        lookups::RadioId rid = m_network->m_ridLookup->find(control.getSrcId());
+        if (!rid.radioDefault()) {
+            if (!rid.radioEnabled()) {
+                // report error event to InfluxDB
+                if (m_network->m_enableInfluxDB) {
+                    influxdb::QueryBuilder()
+                        .meas("call_error_event")
+                            .tag("peerId", std::to_string(peerId))
+                            .tag("streamId", std::to_string(streamId))
+                            .tag("srcId", std::to_string(control.getSrcId()))
+                            .tag("dstId", std::to_string(control.getDstId()))
+                                .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
+                            .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                        .request(m_network->m_influxServer);
+                }
+
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25, NET_ICC::REJECT_TRAFFIC, control.getDstId());
+                return false;
+            }
+        }
+        else {
+            // if this is a default radio -- and we are rejecting undefined radios
+            // report call error
+            if (m_network->m_rejectUnknownRID) {
+                // report error event to InfluxDB
+                if (m_network->m_enableInfluxDB) {
+                    influxdb::QueryBuilder()
+                        .meas("call_error_event")
+                            .tag("peerId", std::to_string(peerId))
+                            .tag("streamId", std::to_string(streamId))
+                            .tag("srcId", std::to_string(control.getSrcId()))
+                            .tag("dstId", std::to_string(control.getDstId()))
+                                .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
+                            .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                        .request(m_network->m_influxServer);
+                }
+
+                LogWarning(LOG_NET, "P25, illegal/unknown RID attempted access, srcId = %u, dstId = %u", control.getSrcId(), control.getDstId());
+
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25, NET_ICC::REJECT_TRAFFIC, control.getDstId());
+                return false;
+            }
         }
     }
 
@@ -1112,6 +1150,32 @@ bool TagP25Data::validate(uint32_t peerId, lc::LC& control, DUID::E duid, const 
                         .request(m_network->m_influxServer);
                 }
 
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25, NET_ICC::REJECT_TRAFFIC, control.getDstId());
+                return false;
+            }
+        }
+        else {
+            // if this is a default radio -- and we are rejecting undefined radios
+            // report call error
+            if (m_network->m_rejectUnknownRID) {
+                // report error event to InfluxDB
+                if (m_network->m_enableInfluxDB) {
+                    influxdb::QueryBuilder()
+                        .meas("call_error_event")
+                            .tag("peerId", std::to_string(peerId))
+                            .tag("streamId", std::to_string(streamId))
+                            .tag("srcId", std::to_string(control.getSrcId()))
+                            .tag("dstId", std::to_string(control.getDstId()))
+                                .field("message", INFLUXDB_ERRSTR_DISABLED_SRC_RID)
+                            .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                        .request(m_network->m_influxServer);
+                }
+
+                LogWarning(LOG_NET, "P25, illegal/unknown RID attempted access, srcId = %u, dstId = %u", control.getSrcId(), control.getDstId());
+
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25, NET_ICC::REJECT_TRAFFIC, control.getDstId());
                 return false;
             }
         }
@@ -1180,9 +1244,22 @@ bool TagP25Data::validate(uint32_t peerId, lc::LC& control, DUID::E duid, const 
                 .request(m_network->m_influxServer);
         }
 
+        // report In-Call Control to the peer sending traffic
+        m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25, NET_ICC::REJECT_TRAFFIC, control.getDstId());
         return false;
     }
 
+    // peer always send list takes priority over any following affiliation rules
+    bool isAlwaysPeer = false;
+    std::vector<uint32_t> alwaysSend = tg.config().alwaysSend();
+    if (alwaysSend.size() > 0) {
+        auto it = std::find(alwaysSend.begin(), alwaysSend.end(), peerId);
+        if (it != alwaysSend.end()) {
+            isAlwaysPeer = true; // skip any following checks and always send traffic
+        }
+    }
+
+    // is the TGID active?
     if (!tg.config().active()) {
         // report error event to InfluxDB
         if (m_network->m_enableInfluxDB) {
@@ -1197,12 +1274,40 @@ bool TagP25Data::validate(uint32_t peerId, lc::LC& control, DUID::E duid, const 
                 .request(m_network->m_influxServer);
         }
 
+        // report In-Call Control to the peer sending traffic
+        m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25, NET_ICC::REJECT_TRAFFIC, control.getDstId());
         return false;
+    }
+
+    // always peers can violate the rules...hurray
+    if (!isAlwaysPeer) {
+        // does the TGID have a permitted RID list?
+        if (tg.config().permittedRIDs().size() > 0) {
+            // does the transmitting RID have permission?
+            std::vector<uint32_t> permittedRIDs = tg.config().permittedRIDs();
+            if (std::find(permittedRIDs.begin(), permittedRIDs.end(), control.getSrcId()) == permittedRIDs.end()) {
+                // report error event to InfluxDB
+                if (m_network->m_enableInfluxDB) {
+                    influxdb::QueryBuilder()
+                        .meas("call_error_event")
+                            .tag("peerId", std::to_string(peerId))
+                            .tag("streamId", std::to_string(streamId))
+                            .tag("srcId", std::to_string(control.getSrcId()))
+                            .tag("dstId", std::to_string(control.getDstId()))
+                                .field("message", INFLUXDB_ERRSTR_RID_NOT_PERMITTED)
+                            .timestamp(std::chrono::duration_cast<std::chrono::nanoseconds>(std::chrono::system_clock::now().time_since_epoch()).count())
+                        .request(m_network->m_influxServer);
+                }
+
+                // report In-Call Control to the peer sending traffic
+                m_network->writePeerICC(peerId, streamId, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25, NET_ICC::REJECT_TRAFFIC, control.getDstId());
+                return false;
+            }
+        }
     }
 
     return true;
 }
-
 
 /* Helper to write a grant packet. */
 
@@ -1349,7 +1454,8 @@ void TagP25Data::write_TSDU(uint32_t peerId, lc::TSBK* tsbk)
 
     uint32_t streamId = m_network->createStreamId();
     if (peerId > 0U) {
-        m_network->writePeer(peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength, RTP_END_OF_CALL_SEQ, streamId, false, true);
+        m_network->writePeer(peerId, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength,
+            RTP_END_OF_CALL_SEQ, streamId, false);
     } else {
         // repeat traffic to the connected peers
         if (m_network->m_peers.size() > 0U) {
@@ -1360,7 +1466,8 @@ void TagP25Data::write_TSDU(uint32_t peerId, lc::TSBK* tsbk)
                     m_network->m_frameQueue->flushQueue();
                 }
 
-                m_network->writePeer(peer.first, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength, RTP_END_OF_CALL_SEQ, streamId, true);
+                m_network->writePeer(peer.first, { NET_FUNC::PROTOCOL, NET_SUBFUNC::PROTOCOL_SUBFUNC_P25 }, message.get(), messageLength, 
+                    RTP_END_OF_CALL_SEQ, streamId, true);
                 if (m_network->m_debug) {
                     LogDebug(LOG_NET, "P25, peer = %u, len = %u, streamId = %u", 
                         peer.first, messageLength, streamId);

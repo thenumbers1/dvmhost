@@ -36,7 +36,7 @@ void* Host::threadNXDNReader(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -44,13 +44,19 @@ void* Host::threadNXDNReader(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
 
+        StopWatch stopWatch;
+        stopWatch.start();
+
         if (host->m_nxdn != nullptr) {
             while (!g_killed) {
+                uint32_t ms = stopWatch.elapsed();
+                stopWatch.start();
+
                 // scope is intentional
                 {
                     // ------------------------------------------------------
@@ -97,6 +103,23 @@ void* Host::threadNXDNReader(void* arg)
                                     LogWarning(LOG_HOST, "NXDN modem data received, state = %u", host->m_state);
                                 }
                             }
+
+                            // were frames received while still in an reject state? if so, reset the timer
+                            if (host->m_nxdn->getRFState() == RS_RF_REJECTED) {
+                                host->m_nxdnRejectTimer.start();
+                                host->m_nxdnRejCnt++;
+                            }
+                        } else {
+                            // if we're receiving no more frames, and we're in a reject state, clear the state
+                            if (host->m_nxdn->getRFState() == RS_RF_REJECTED) {
+                                host->m_nxdnRejectTimer.clock(ms);
+                                if (host->m_nxdnRejectTimer.hasExpired()) {
+                                    LogMessage(LOG_HOST, "NXDN, reset from previous call reject, frames = %u", host->m_nxdnRejCnt);
+                                    host->m_nxdnRejectTimer.stop();
+                                    host->m_nxdn->clearRFReject();
+                                    host->m_nxdnRejCnt = 0U;
+                                }
+                            }
                         }
                     }
                 }
@@ -108,7 +131,7 @@ void* Host::threadNXDNReader(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 
@@ -131,7 +154,7 @@ void* Host::threadNXDNWriter(void* arg)
         Host* host = static_cast<Host*>(th->obj);
         if (host == nullptr) {
             g_killed = true;
-            LogDebug(LOG_HOST, "[FAIL] %s", threadName.c_str());
+            LogError(LOG_HOST, "[FAIL] %s", threadName.c_str());
         }
 
         if (g_killed) {
@@ -139,7 +162,7 @@ void* Host::threadNXDNWriter(void* arg)
             return nullptr;
         }
 
-        LogDebug(LOG_HOST, "[ OK ] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[ OK ] %s", threadName.c_str());
 #ifdef _GNU_SOURCE
         ::pthread_setname_np(th->thread, threadName.c_str());
 #endif // _GNU_SOURCE
@@ -224,7 +247,7 @@ void* Host::threadNXDNWriter(void* arg)
             }
         }
 
-        LogDebug(LOG_HOST, "[STOP] %s", threadName.c_str());
+        LogMessage(LOG_HOST, "[STOP] %s", threadName.c_str());
         delete th;
     }
 

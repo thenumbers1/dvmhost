@@ -5,7 +5,7 @@
  * DO NOT ALTER OR REMOVE COPYRIGHT NOTICES OR THIS FILE HEADER.
  *
  *  Copyright (C) 2015,2016,2017 Jonathan Naylor, G4KLX
- *  Copyright (C) 2017-2024 Bryan Biedenkapp, N2PLL
+ *  Copyright (C) 2017-2025 Bryan Biedenkapp, N2PLL
  *
  */
 #include "Defines.h"
@@ -176,6 +176,23 @@ void Control::setOptions(yaml::Node& conf, bool supervisor, ::lookups::VoiceChDa
     m_slot1->m_ignoreAffiliationCheck = ignoreAffiliationCheck;
     m_slot2->m_ignoreAffiliationCheck = ignoreAffiliationCheck;
 
+    // set the In-Call Control function callback
+    if (m_network != nullptr) {
+        m_network->setDMRICCCallback([=](network::NET_ICC::ENUM command, uint32_t dstId, uint8_t slotNo) { processInCallCtrl(command, dstId, slotNo); });
+    }
+
+    /*
+    ** Network Grant Disables
+    */
+    bool disableNetworkGrant = dmrProtocol["disableNetworkGrant"].as<bool>(false);
+    m_slot1->m_disableNetworkGrant = disableNetworkGrant;
+    m_slot2->m_disableNetworkGrant = disableNetworkGrant;
+
+    bool convNetGrantDemand = dmrProtocol["convNetGrantDemand"].as<bool>(false);
+    m_slot1->m_convNetGrantDemand = convNetGrantDemand;
+    m_slot2->m_convNetGrantDemand = convNetGrantDemand;
+
+
     if (printOptions) {
         if (enableTSCC) {
             LogInfo("    TSCC Slot: %u", m_tsccSlotNo);
@@ -185,6 +202,9 @@ void Control::setOptions(yaml::Node& conf, bool supervisor, ::lookups::VoiceChDa
                 LogInfo("    TSCC Disable Grant Source ID Check: yes");
             }
         }
+        if (disableNetworkGrant) {
+            LogInfo("    Disable Network Grants: yes");
+        }
 
         LogInfo("    Ignore Affiliation Check: %s", ignoreAffiliationCheck ? "yes" : "no");
         LogInfo("    Notify Control: %s", notifyCC ? "yes" : "no");
@@ -192,6 +212,7 @@ void Control::setOptions(yaml::Node& conf, bool supervisor, ::lookups::VoiceChDa
         LogInfo("    Frame Loss Threshold: %u", frameLossThreshold);
 
         LogInfo("    Verify Registration: %s", Slot::m_verifyReg ? "yes" : "no");
+        LogInfo("    Conventional Network Grant Demand: %s", convNetGrantDemand ? "yes" : "no");
     }
 }
 
@@ -466,6 +487,38 @@ dmr::lookups::DMRAffiliationLookup* Control::affiliations()
     return nullptr;
 }
 
+/* Returns the current operating RF state of the DMR controller. */
+
+RPT_RF_STATE Control::getRFState(uint32_t slotNo) const
+{
+    switch (slotNo) {
+    case 1U:
+        return m_slot1->getRFState();
+    case 2U:
+        return m_slot2->getRFState();
+    default:
+        LogError(LOG_DMR, "DMR, invalid slot, slotNo = %u", slotNo);
+        break;
+    }
+
+    return RS_RF_INVALID;
+}
+
+/* Clears the current operating RF state back to idle (with no data reset!). */
+
+void Control::clearRFReject(uint32_t slotNo)
+{
+    switch (slotNo) {
+    case 1U:
+        return m_slot1->clearRFReject();
+    case 2U:
+        return m_slot2->clearRFReject();
+    default:
+        LogError(LOG_DMR, "DMR, invalid slot, slotNo = %u", slotNo);
+        break;
+    }
+}
+
 /* Helper to return the slot carrying the TSCC. */
 
 Slot* Control::getTSCCSlot() const
@@ -660,6 +713,8 @@ void Control::processNetwork()
     uint32_t srcId = __GET_UINT16(buffer, 5U);
     uint32_t dstId = __GET_UINT16(buffer, 8U);
 
+    uint8_t controlByte = buffer[14U];
+
     FLCO::E flco = (buffer[15U] & 0x40U) == 0x40U ? FLCO::PRIVATE : FLCO::GROUP;
 
     uint32_t slotNo = (buffer[15U] & 0x80U) == 0x80U ? 2U : 1U;
@@ -690,6 +745,8 @@ void Control::processNetwork()
     data.setSrcId(srcId);
     data.setDstId(dstId);
     data.setFLCO(flco);
+
+    data.setControl(controlByte);
 
     bool dataSync = (buffer[15U] & 0x20U) == 0x20U;
     bool voiceSync = (buffer[15U] & 0x10U) == 0x10U;
@@ -735,5 +792,20 @@ void Control::processNetwork()
         case 2U:
             m_slot2->processNetwork(data);
             break;
+    }
+}
+
+/* Helper to process an In-Call Control message. */
+
+void Control::processInCallCtrl(network::NET_ICC::ENUM command, uint32_t dstId, uint8_t slotNo)
+{
+    switch (slotNo) {
+    case 1U:
+        return m_slot1->processInCallCtrl(command, dstId);
+    case 2U:
+        return m_slot2->processInCallCtrl(command, dstId);
+    default:
+        LogError(LOG_DMR, "DMR, invalid slot, slotNo = %u", slotNo);
+        break;
     }
 }

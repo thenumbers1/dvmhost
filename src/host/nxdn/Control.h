@@ -31,6 +31,7 @@
 #include "common/lookups/RadioIdLookup.h"
 #include "common/lookups/TalkgroupRulesLookup.h"
 #include "common/lookups/AffiliationLookup.h"
+#include "common/network/RTPFNEHeader.h"
 #include "common/RingBuffer.h"
 #include "common/StopWatch.h"
 #include "common/Timer.h"
@@ -60,7 +61,7 @@ namespace nxdn
     // ---------------------------------------------------------------------------
 
     /**
-     * @brief This class implements core logic for handling NXDN.
+     * @brief This class implements core controller logic for handling NXDN.
      * @ingroup host_nxdn
      */
     class HOST_SW_API Control {
@@ -212,6 +213,16 @@ namespace nxdn
         lookups::AffiliationLookup affiliations() { return m_affiliations; }
 
         /**
+         * @brief Returns the current operating RF state of the NXDN controller.
+         * @returns RPT_RF_STATE 
+         */
+        RPT_RF_STATE getRFState() const { return m_rfState; }
+        /**
+         * @brief Clears the current operating RF state back to idle.
+         */
+        void clearRFReject();
+
+        /**
          * @brief Flag indicating whether the processor or is busy or not.
          * @returns bool True, if processor is busy, otherwise false.
          */
@@ -361,6 +372,12 @@ namespace nxdn
          * @brief Helper to process loss of frame stream from modem.
          */
         void processFrameLoss();
+        /**
+         * @brief Helper to process an In-Call Control message.
+         * @param command In-Call Control Command.
+         * @param dstId Destination ID.
+         */
+        void processInCallCtrl(network::NET_ICC::ENUM command, uint32_t dstId);
 
         /**
          * @brief Helper to send a REST API request to the CC to release a channel grant at the end of a call.
